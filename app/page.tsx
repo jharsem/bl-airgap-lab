@@ -1,3 +1,15 @@
+// AirGap Lab transmit/receive UI.
+//
+// The transport mechanics here — sender frame pacing and the staging-canvas
+// render path, the fixed QR mask, camera acquisition with its exact-then-ideal
+// frame rate fallback, and the requestVideoFrameCallback capture loop — are
+// adapted from Decimen Optical Transfer (send/main.ts, receive/main.ts) by
+// BashAlarmist, MIT licensed. See THIRD-PARTY-NOTICES.md.
+// https://github.com/bashalarmistalt/decimen-optical-transfer
+//
+// The React structure, calibration sweep, and DPI-aware integer scaling are
+// AirGap Lab's own.
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
 import DecoderWorker from "./optical/decoder.worker?worker&inline";

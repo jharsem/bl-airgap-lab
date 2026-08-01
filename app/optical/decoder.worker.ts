@@ -1,5 +1,14 @@
 /// <reference lib="webworker" />
 
+// QR decode worker: zxing-cpp compiled to WASM. Safari has never shipped
+// BarcodeDetector, so WASM is the only portable route. One frame in flight per
+// worker; the main thread drops frames when every worker is busy, which is
+// safe because the fountain treats frames as disposable.
+//
+// Adapted from Decimen Optical Transfer (receive/worker.ts) by BashAlarmist,
+// MIT licensed. See THIRD-PARTY-NOTICES.md.
+// https://github.com/bashalarmistalt/decimen-optical-transfer
+
 import wasmUrl from "zxing-wasm/reader/zxing_reader.wasm?url";
 import { prepareZXingModule, readBarcodes } from "zxing-wasm/reader";
 
