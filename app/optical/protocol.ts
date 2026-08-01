@@ -1,3 +1,14 @@
+// Self-describing frame protocol: every QR frame carries enough header to
+// stand alone, so there is no handshake and a receiver can lock onto a stream
+// mid-flight.
+//
+// The 20-byte data-frame layout and its 0xD1 0x0C magic bytes are adapted from
+// Decimen Optical Transfer (shared/protocol.ts) by BashAlarmist, MIT licensed.
+// See THIRD-PARTY-NOTICES.md.
+// https://github.com/bashalarmistalt/decimen-optical-transfer
+//
+// The calibration packet types (CAL_*) are specific to AirGap Lab.
+
 export const HEADER_LEN = 20;
 const DATA_MAGIC0 = 0xd1;
 const DATA_MAGIC1 = 0x0c;

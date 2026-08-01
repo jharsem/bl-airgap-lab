@@ -7,6 +7,11 @@ its camera to reconstruct and verify the original bytes.
 The application is local-first. It has no account system, backend, analytics,
 database, cloud API, or network transfer path for the payload.
 
+<p align="center">
+  <img src="docs/screenshot.jpg" width="820"
+       alt="AirGap Lab transmit view: a 64 kB synthetic payload streaming as fountain-coded QR frames, with payload and device-calibration controls alongside" />
+</p>
+
 ## Run locally
 
 Requirements: Node.js 22.13 or newer.
@@ -65,3 +70,21 @@ a payload with simulated dropped and duplicate fountain frames.
 AirGap Lab does not create a radio or network data channel between sender and
 receiver. A network connection may be used only to load the page; the selected
 payload itself travels through the screen and camera.
+
+## Acknowledgements
+
+The fountain-coding core of this project is adapted from
+[Decimen Optical Transfer](https://github.com/bashalarmistalt/decimen-optical-transfer)
+by BashAlarmist, used under the MIT License. Thank you.
+
+That project worked out a materially better approach to the speed-limiting part
+of an optical link than we had: a deterministic robust-soliton LT construction
+where the degree distribution is reproducible bit-for-bit across JavaScript
+engines. That determinism is what lets the sender fire frames blind at full
+rate, with no handshake, no back-channel, and no retransmission — a dropped
+frame costs a little time rather than correctness. It is the difference between
+a demo and something that actually sustains throughput.
+
+`app/optical/fountain.ts` and `app/optical/protocol.ts` are derived from that
+work. Full attribution and the upstream license are in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

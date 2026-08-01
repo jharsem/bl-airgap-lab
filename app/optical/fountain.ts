@@ -1,3 +1,15 @@
+// Deterministic robust-soliton LT fountain coding.
+//
+// Adapted from Decimen Optical Transfer (shared/fountain.ts) by BashAlarmist,
+// MIT licensed. See THIRD-PARTY-NOTICES.md.
+// https://github.com/bashalarmistalt/decimen-optical-transfer
+//
+// deterministicLog() below is the load-bearing detail inherited from that
+// work: sender and receiver must build bit-identical degree distributions,
+// but Math.log is implementation-approximated, so V8 and JavaScriptCore can
+// differ by an ulp and silently desynchronize the two streams. This uses only
+// exactly-specified IEEE-754 operations.
+
 import { splitmix32 } from "./protocol";
 
 const LN2 = 0.6931471805599453;
