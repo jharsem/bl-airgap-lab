@@ -85,6 +85,6 @@ rate, with no handshake, no back-channel, and no retransmission — a dropped
 frame costs a little time rather than correctness. It is the difference between
 a demo and something that actually sustains throughput.
 
-The optical layer — `app/optical/` and the transport mechanics inside
-`app/page.tsx` — is derived from that work. A file-by-file breakdown and the
-upstream license are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+The optical layer in `app/optical/` is derived from that work. A file-by-file
+breakdown and the upstream license are in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

@@ -28,26 +28,14 @@ by BashAlarmist, used under the MIT License.
   `isValid && bytes.length > 0` result filter, and the 8×8 `ImageData`
   warm-up decode that reports readiness under sentinel id `-1`.
 
-### `app/page.tsx` — from `send/main.ts` and `receive/main.ts`
-
-A React rewrite, but the transport mechanics are adapted:
-
-- Sender frame pacing and the staging-canvas render path
-  (`putImageData` → `imageSmoothingEnabled = false` → scaled `drawImage`).
-- The fixed `maskPattern: 4` QR encoding choice.
-- Receiver camera acquisition, including the nested `getUserMedia` retry that
-  falls back from an exact to an ideal frame rate.
-- The `requestVideoFrameCallback` capture loop and its typed shim, and the
-  `willReadFrequently` grab canvas.
-- Payload verification by comparing `fnv1a` against the header checksum.
-
 ## Not derived
 
-`app/globals.css`, `src/main.tsx`, `index.html`, the build configuration, and
-the test suite are AirGap Lab's own work. AirGap Lab also adds a
-calibration-sweep packet type and control flow, DPI-aware integer frame
-scaling, a synthetic payload generator, and a single-file build. Those
-additions do not change the provenance of the material above.
+`app/page.tsx`, `app/globals.css`, `src/main.tsx`, `index.html`, the build
+configuration, and the test suite are AirGap Lab's own work. `app/page.tsx`
+calls into the modules listed above, but the transmit/receive UI, the
+calibration sweep and its packet types, DPI-aware integer frame scaling, and
+the synthetic payload generator are original. Those additions do not change
+the provenance of the material above.
 
 ### License
 
