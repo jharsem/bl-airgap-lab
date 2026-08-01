@@ -1,0 +1,77 @@
+name: Release
+
+# Cutting a release is `git tag v1.0.0 && git push origin v1.0.0`.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Stage the artifact
+        id: stage
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          name="airgap-lab-${GITHUB_REF_NAME}.html"
+          cp dist/index.html "release/${name}"
+          digest="$(sha256sum "release/${name}" | cut -d' ' -f1)"
+          size="$(du -h "release/${name}" | cut -f1)"
+          ( cd release && sha256sum "${name}" > SHA256SUMS )
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "size=${size}" >> "$GITHUB_OUTPUT"
+
+      # The digest goes in the release body, not only in a file beside the
+      # artifact. A checksum stored next to the thing it checks only proves the
+      # download was not corrupted, not that it was not replaced.
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          AirGap Lab ${GITHUB_REF_NAME} — one self-contained HTML file.
+
+          No CDN, no runtime dependencies, no network path for the payload.
+          Download it, verify the digest below, and open it in a browser.
+
+          | | |
+          |---|---|
+          | File | \`${{ steps.stage.outputs.name }}\` |
+          | Size | ${{ steps.stage.outputs.size }} |
+          | SHA-256 | \`${{ steps.stage.outputs.digest }}\` |
+
+          Verify before use:
+
+          \`\`\`bash
+          shasum -a 256 ${{ steps.stage.outputs.name }}
+          # expect: ${{ steps.stage.outputs.digest }}
+          \`\`\`
+
+          Transmitting works from \`file://\`. Receiving needs a camera, and
+          browsers only grant camera access in a secure context, so serve the
+          file over HTTPS (or from localhost) to receive.
+          EOF
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "AirGap Lab ${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            release/*

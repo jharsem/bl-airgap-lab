@@ -48,6 +48,20 @@ npm run preview
 
 The single HTML file can also be copied to any static HTTPS web server.
 
+## Get it
+
+Each release attaches that single file, with its SHA-256 in the release notes.
+For an air-gapped machine this is the file to carry across — verify it first:
+
+```bash
+shasum -a 256 airgap-lab-v1.0.0.html
+```
+
+The hosted build at
+[jharsem.github.io/bl-airgap-lab](https://jharsem.github.io/bl-airgap-lab/) is
+for trying it out. If you actually care about the air gap, use the downloaded
+file rather than loading the app over the network each time.
+
 ## Test
 
 ```bash
