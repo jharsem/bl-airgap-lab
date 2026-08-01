@@ -113,14 +113,65 @@ The bulk stream is byte-identical across both modes and across recipient count
   standard fix is to omit recipient ids and have receivers trial-decrypt each
   packet until one opens. Worth deciding deliberately rather than by default.
 
-### Open question
+### Sender key: settled — ephemeral ECDH plus a separate signing key
 
-Whether the sender uses a static identity key or a per-transfer ephemeral one
-is unresolved, and it is a real trade-off rather than a detail: a static sender
-key authenticates the sender but weakens forward secrecy, and an ephemeral one
-does the reverse. Signing separately buys both at the cost of a larger packet.
-Decide this before writing the key packet format, since it determines what the
-packet has to carry.
+Decided 2026-08-02. Wrap each recipient's copy of the content key under
+`ECDH(ephemeral, recipient_pub)` with a keypair generated fresh per transfer and
+discarded, and authenticate the sender with an independent long-term *signing*
+key. Encryption keys encrypt, signing keys sign; they are not the same key.
+
+Rejected, and why — the framing "static or ephemeral" has four positions, not
+two, and both pure options are bad here:
+
+- **Static sender ECDH key.** The shared secret for a given sender/recipient
+  pair never changes, so one compromise at either end retroactively opens every
+  transfer ever sent between them. It also needs a per-transfer HKDF salt purely
+  to avoid reusing a wrapping key, which is a correctness obligation rather than
+  a security gain.
+- **Ephemeral alone.** Authenticates nothing. Recipient public keys are public,
+  so anyone can mint an ephemeral key, wrap a content key to a recipient, and
+  produce a transfer that opens with a valid GCM tag. That is precisely the
+  substitution attack `crypto.ts` already names — "anyone who can put frames in
+  front of the camera can substitute the payload" — except the UI would now
+  label it sealed. Strictly worse than v1, where a sender at least had to know
+  the phrase.
+- **HPKE auth mode** (`ECDH(ephemeral, R) || ECDH(static, R)`, RFC 9180) was the
+  close alternative and is not a wrong answer. Rejected for being harder to
+  explain and to surface: its authentication is implicit and non-transferable,
+  and WebCrypto has no HPKE, so it would be hand-assembled anyway. A detached
+  signature is verifiable by third parties and by people not enrolled as
+  recipients, a compromised signing key decrypts nothing, and "sealed for five
+  people" and "signed by Alice" render as two independent claims in the UI.
+
+**Do not claim forward secrecy in the UI.** Real forward secrecy needs fresh key
+material from both ends, and receivers never transmit — that is the whole point
+of a one-way blast. A recipient's long-term key is by definition what opens the
+payload, so its compromise opens every recording ever made to them. The
+ephemeral sender key buys forward secrecy against *sender* compromise only. Say
+that precisely or not at all.
+
+Primitives: ECDH P-256 and HKDF are universally available in WebCrypto. For
+signatures prefer ECDSA P-256 over Ed25519 — broader reach on the old browsers
+an air-gapped tool is likely to meet, and no new dependency.
+
+### Consequences for the packet format
+
+- Carry the ephemeral public key once per stream (33 bytes compressed P-256, 65
+  uncompressed), plus a signature and signer key id.
+- **Sign a transcript, not the payload.** Bind the ephemeral public key, the
+  content nonce, a digest of the recipient set, and the payload digest.
+  Signing the payload alone lets an attacker splice a valid signature onto a
+  different recipient list or different content.
+- Include the content key's digest in that transcript. AES-GCM is not
+  key-committing, which in a multi-recipient envelope enables the *invisible
+  salamanders* problem: one ciphertext crafted to open as different valid
+  plaintexts under different recipients' keys, every tag verifying — two people
+  in the same room opening the same broadcast and seeing different files. Low
+  priority for one trusted sender, but it is a property of the construction
+  rather than a bug testing would surface, and committing to the content key is
+  cheap when designed in and awkward to retrofit.
+- All of it rides in the repeating packets. A late joiner needs the ephemeral
+  public key and the signature exactly as much as it needs its own wrapped key.
 
 ## Design decisions already settled
 
