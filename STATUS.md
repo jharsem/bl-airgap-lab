@@ -63,8 +63,64 @@ which the v1 shared passphrase can provide.
 
 The v1 header is already compatible: `kdf` is an id, not a hardcoded
 assumption, so a v2 key-agreement mode is a new value rather than a redesign.
-Note that key packets reveal the recipient count; omitting key ids and having
-receivers trial-decrypt is the usual fix if that matters.
+
+*What v1 cannot do, and why v2 exists.* A shared passphrase means anyone who
+ever learned it can open any recording of any transfer that used it, forever;
+one person cannot be dropped from the audience without re-keying everyone; and
+no receiver can tell who sent a payload, since anyone holding the phrase can
+also produce one. None of that is a defect in v1 — it is what a shared secret
+is. v2 is for when revocation or sender identity is actually needed. **A room
+that trusts a common phrase should keep using v1**, which is simpler and has no
+key management.
+
+### Sketch
+
+Seal the payload under a freshly generated, single-use content key. Wrap that
+content key once per recipient under a key only that recipient can derive, and
+broadcast the wrapped-key packets alongside the stream. Recipient finds its own
+packet, unwraps the content key, opens the payload.
+
+The bulk stream is byte-identical across both modes and across recipient count
+— only the wrapped-key packets multiply, at a few hundred bytes each.
+
+### Work involved, roughly in order of difficulty
+
+1. **Key packets.** A new packet type riding alongside the data stream.
+   `protocol.ts` already has the pattern to copy in the `0xca` calibration
+   packets — same idea, same interleaving.
+2. **Key agreement in `crypto.ts`.** ECDH to derive a per-recipient wrapping
+   key, then wrap the content key. WebCrypto covers this natively, so no new
+   dependency.
+3. **A header layout for `kdf = 2`.** The v1 sealed header spends 32 bytes on
+   `salt` and `iterations` (`SEALED_HEADER_LEN = 52`). With no passphrase to
+   stretch, both are meaningless under v2 and the layout needs redefining. The
+   nonce is still required.
+4. **Key management UI, which is the bulk of the work.** Generating and
+   persisting an identity keypair, displaying a public key as a QR, scanning
+   other people's, and maintaining an enrolled-recipient list. The cryptography
+   here is routine; the interface is not. Budget accordingly — this is a much
+   larger piece of work than anything in v1, and most of it is not crypto.
+
+### Two properties not to lose
+
+- **Key packets must repeat for the whole stream, not play once at the start.**
+  This is the same reasoning that put the crypto header in every sealed frame
+  instead of a manifest. Emit them once and a late-joining receiver collects a
+  complete ciphertext it can never open — the exact failure the v1 design
+  avoids, and the case confirmed working by hand on 2026-08-02. Any v2 work
+  must be re-tested against a mid-stream join.
+- **Packet count leaks the recipient count** to anyone filming the screen. The
+  standard fix is to omit recipient ids and have receivers trial-decrypt each
+  packet until one opens. Worth deciding deliberately rather than by default.
+
+### Open question
+
+Whether the sender uses a static identity key or a per-transfer ephemeral one
+is unresolved, and it is a real trade-off rather than a detail: a static sender
+key authenticates the sender but weakens forward secrecy, and an ephemeral one
+does the reverse. Signing separately buys both at the cost of a larger packet.
+Decide this before writing the key packet format, since it determines what the
+packet has to carry.
 
 ## Design decisions already settled
 
