@@ -1,0 +1,32 @@
+{
+  "name": "bl-airgap-lab",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/fountain.test.mjs"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "zxing-wasm": "^3.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-basic-ssl": "^2.1.0",
+    "@vitejs/plugin-react": "6.0.2",
+    "typescript": "5.9.3",
+    "vite": "8.0.13",
+    "vite-plugin-singlefile": "^2.3.0"
+  },
+  "type": "module"
+}
