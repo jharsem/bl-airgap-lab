@@ -9,12 +9,29 @@
 //
 // The calibration packet types (CAL_*) are specific to AirGap Lab.
 
+// Sealed frames carry the KDF parameters, salt, and nonce in every frame
+// rather than in a one-off manifest frame. A manifest is the obvious
+// alternative and it is wrong here: a receiver that joined late, or that
+// dropped the one frame carrying it, could collect a complete ciphertext it
+// has no way to open. Self-describing frames are what make late joining work,
+// and that property has to extend to the crypto parameters. The cost is 32
+// bytes per sealed frame; unsealed frames are unchanged.
+
 export const HEADER_LEN = 20;
+export const SEALED_HEADER_LEN = 52;
 const DATA_MAGIC0 = 0xd1;
 const DATA_MAGIC1 = 0x0c;
+const SEALED_MAGIC1 = 0x0e;
 const CAL_MAGIC0 = 0xca;
 const CAL_CONTROL = 0x10;
 const CAL_DATA = 0x11;
+
+export interface FrameSeal {
+  kdf: number;
+  iterations: number;
+  salt: Uint8Array;
+  nonce: Uint8Array;
+}
 
 export interface FrameHeader {
   sessionId: number;
@@ -22,7 +39,10 @@ export interface FrameHeader {
   k: number;
   blockLen: number;
   totalLen: number;
+  /** FNV-1a over the transmitted bytes. Reassembly check only — keyless. */
   payloadFnv: number;
+  /** Present when the payload is AES-GCM sealed; the fountain carries ciphertext. */
+  seal?: FrameSeal;
 }
 
 export type CalibrationEvent = "start" | "end" | "complete";
@@ -38,31 +58,60 @@ export interface CalibrationPacket {
   duration: number;
 }
 
+export function frameHeaderLen(sealed: boolean) {
+  return sealed ? SEALED_HEADER_LEN : HEADER_LEN;
+}
+
 export function packFrame(header: FrameHeader, block: Uint8Array): Uint8Array {
-  const out = new Uint8Array(HEADER_LEN + block.length);
+  const seal = header.seal;
+  const headerLen = frameHeaderLen(Boolean(seal));
+  const out = new Uint8Array(headerLen + block.length);
   const view = new DataView(out.buffer);
   view.setUint8(0, DATA_MAGIC0);
-  view.setUint8(1, DATA_MAGIC1);
+  view.setUint8(1, seal ? SEALED_MAGIC1 : DATA_MAGIC1);
   view.setUint16(2, header.sessionId, true);
   view.setUint32(4, header.seq, true);
   view.setUint16(8, header.k, true);
   view.setUint16(10, header.blockLen, true);
   view.setUint32(12, header.totalLen, true);
   view.setUint32(16, header.payloadFnv, true);
-  out.set(block, HEADER_LEN);
+  if (seal) {
+    view.setUint8(20, seal.kdf);
+    view.setUint8(21, 0);
+    // Iterations travel in thousands so the field fits a u16 and the receiver
+    // derives with the sender's cost rather than a hardcoded one.
+    view.setUint16(22, Math.round(seal.iterations / 1000), true);
+    out.set(seal.salt, 24);
+    out.set(seal.nonce, 40);
+  }
+  out.set(block, headerLen);
   return out;
 }
 
 export function parseFrame(bytes: Uint8Array): { header: FrameHeader; block: Uint8Array } | null {
-  if (bytes.length <= HEADER_LEN || bytes[0] !== DATA_MAGIC0 || bytes[1] !== DATA_MAGIC1) return null;
+  if (bytes.length < 2 || bytes[0] !== DATA_MAGIC0) return null;
+  const sealed = bytes[1] === SEALED_MAGIC1;
+  if (!sealed && bytes[1] !== DATA_MAGIC1) return null;
+  const headerLen = frameHeaderLen(sealed);
+  if (bytes.length <= headerLen) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const header: FrameHeader = {
     sessionId: view.getUint16(2, true), seq: view.getUint32(4, true),
     k: view.getUint16(8, true), blockLen: view.getUint16(10, true),
     totalLen: view.getUint32(12, true), payloadFnv: view.getUint32(16, true),
   };
-  if (!header.k || !header.blockLen || !header.totalLen || bytes.length !== HEADER_LEN + header.blockLen) return null;
-  return { header, block: bytes.subarray(HEADER_LEN) };
+  if (!header.k || !header.blockLen || !header.totalLen || bytes.length !== headerLen + header.blockLen) return null;
+  if (sealed) {
+    const iterations = view.getUint16(22, true) * 1000;
+    if (!iterations) return null;
+    header.seal = {
+      kdf: view.getUint8(20),
+      iterations,
+      salt: bytes.slice(24, 40),
+      nonce: bytes.slice(40, 52),
+    };
+  }
+  return { header, block: bytes.subarray(headerLen) };
 }
 
 const EVENT_TO_BYTE: Record<CalibrationEvent, number> = { start: 0, end: 1, complete: 2 };

@@ -4,12 +4,24 @@ import DecoderWorker from "./optical/decoder.worker?worker&inline";
 import { LTDecoder, LTEncoder } from "./optical/fountain";
 import {
   fnv1a, packCalibrationControl, packCalibrationData, packFrame,
-  parseCalibrationPacket, parseFrame, type CalibrationEvent, type CalibrationPacket,
+  parseCalibrationPacket, parseFrame, type CalibrationEvent, type CalibrationPacket, type FrameSeal,
 } from "./optical/protocol";
+import { fingerprint, seal as sealPayload, sha256, unseal } from "./optical/crypto";
 
 type Mode = "send" | "receive";
 type ErrorLevel = "L" | "M";
-type SourceModel = { bytes: Uint8Array; name: string; sessionId: number; payloadFnv: number; blockLen: number };
+type UnsealState = "locked" | "working" | "failed" | "open";
+type SourceModel = {
+  bytes: Uint8Array;
+  /** What the fountain actually codes: ciphertext when sealed, otherwise the payload. */
+  transmit: Uint8Array;
+  name: string;
+  sessionId: number;
+  payloadFnv: number;
+  blockLen: number;
+  seal?: FrameSeal;
+  digest: string;
+};
 type CalibrationResult = { run: number; profile: number; profiles: number; name: string; sequence: number; blockSize: number; fps: number; duration: number; unique: number; reads: number };
 type QrImage = { image: ImageData; version: number; modules: number; sequence: number };
 
@@ -91,6 +103,14 @@ export default function Home() {
   const [receiveStats, setReceiveStats] = useState({ rank: 0, total: 0, unique: 0, bytes: 0, elapsed: 0, scans: 0 });
   const [completeData, setCompleteData] = useState<Uint8Array | null>(null);
   const [verified, setVerified] = useState<boolean | null>(null);
+  const [passphrase, setPassphrase] = useState("");
+  const [sealPassphrase, setSealPassphrase] = useState("");
+  const [sealing, setSealing] = useState(false);
+  const [receivePassphrase, setReceivePassphrase] = useState("");
+  const [sealedRaw, setSealedRaw] = useState<Uint8Array | null>(null);
+  const [sealedParams, setSealedParams] = useState<FrameSeal | null>(null);
+  const [unsealState, setUnsealState] = useState<UnsealState>("locked");
+  const [receivedDigest, setReceivedDigest] = useState("");
   const qrCanvas = useRef<HTMLCanvasElement>(null);
   const video = useRef<HTMLVideoElement>(null);
   const scanCanvas = useRef<HTMLCanvasElement>(null);
@@ -111,19 +131,39 @@ export default function Home() {
   const receiveStarted = useRef(0);
   const initialized = useRef(false);
 
-  const buildPayload = useCallback((bytes: Uint8Array, name: string, nextBlockSize = chunkSize) => {
+  const buildPayload = useCallback(async (
+    bytes: Uint8Array, name: string, nextBlockSize = chunkSize, phrase = sealPassphrase,
+  ) => {
     equationCounter.current = 0;
     const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
-    setModel({ bytes, name, sessionId, payloadFnv: fnv1a(bytes), blockLen: nextBlockSize });
-    setSendIndex(0);
     setSending(false);
-    setDisplayFps(0);
-  }, [chunkSize]);
+    setSealing(Boolean(phrase));
+    try {
+      // Fingerprint the plaintext, so the value shown here is comparable with
+      // the one the receiver shows after a successful open.
+      const digest = fingerprint(await sha256(bytes));
+      let transmit = bytes;
+      let seal: FrameSeal | undefined;
+      if (phrase) {
+        const sealed = await sealPayload(bytes, phrase);
+        transmit = sealed.ciphertext;
+        seal = { kdf: sealed.kdf, iterations: sealed.iterations, salt: sealed.salt, nonce: sealed.nonce };
+      }
+      setModel({
+        bytes, transmit, name, sessionId, payloadFnv: fnv1a(transmit),
+        blockLen: nextBlockSize, seal, digest,
+      });
+      setSendIndex(0);
+      setDisplayFps(0);
+    } finally {
+      setSealing(false);
+    }
+  }, [chunkSize, sealPassphrase]);
 
   const makeSynthetic = useCallback(() => {
     const bytes = new Uint8Array(payloadSize * 1024);
     crypto.getRandomValues(bytes);
-    buildPayload(bytes, `synthetic-${payloadSize}kb.bin`);
+    void buildPayload(bytes, `synthetic-${payloadSize}kb.bin`);
   }, [buildPayload, payloadSize]);
 
   useEffect(() => {
@@ -132,6 +172,13 @@ export default function Home() {
     const timer = window.setTimeout(makeSynthetic, 0);
     return () => window.clearTimeout(timer);
   }, [makeSynthetic]);
+
+  // Sealing costs a 600k-iteration KDF, so it is bound to an explicit commit
+  // rather than to keystrokes in the passphrase field.
+  const applyPassphrase = useCallback((phrase: string) => {
+    setSealPassphrase(phrase);
+    if (model) void buildPayload(model.bytes, model.name, model.blockLen, phrase);
+  }, [buildPayload, model]);
 
   useEffect(() => {
     if (!qrCanvas.current || !model) return;
@@ -176,7 +223,7 @@ export default function Home() {
       drawCalibration();
       return () => { cancelled = true; window.clearTimeout(timer); };
     }
-    const encoder = new LTEncoder(model.bytes, model.blockLen, model.sessionId);
+    const encoder = new LTEncoder(model.transmit, model.blockLen, model.sessionId);
     let version: number | undefined;
     let nextSequence = equationCounter.current;
     const queue: QrImage[] = [];
@@ -184,7 +231,7 @@ export default function Home() {
       const block = encoder.encode(nextSequence);
       const bytes = packFrame({
         sessionId: model.sessionId, seq: nextSequence, k: encoder.k, blockLen: model.blockLen,
-        totalLen: model.bytes.length, payloadFnv: model.payloadFnv,
+        totalLen: model.transmit.length, payloadFnv: model.payloadFnv, seal: model.seal,
       }, block);
       const frame = createQrImage(bytes, errorLevel, nextSequence, version);
       version = frame.version;
@@ -253,6 +300,10 @@ export default function Home() {
     setCalibrationComplete(false);
     setCompleteData(null);
     setVerified(null);
+    setSealedRaw(null);
+    setSealedParams(null);
+    setUnsealState("locked");
+    setReceivedDigest("");
   }, []);
 
   const acceptCalibration = useCallback((packet: CalibrationPacket) => {
@@ -324,8 +375,22 @@ export default function Home() {
         rank: expected, total: expected, unique: active.framesNew, bytes: header.totalLen,
         elapsed, scans: active.framesNew + active.framesDup,
       });
-      setCompleteData(payload);
-      setVerified(fnv1a(payload) === header.payloadFnv);
+      const intact = fnv1a(payload) === header.payloadFnv;
+      if (header.seal) {
+        // Reassembled ciphertext. Nothing is trusted until GCM says so, and
+        // the passphrase may not have been entered yet, so hold it and wait.
+        setSealedRaw(payload);
+        setSealedParams(header.seal);
+        setCompleteData(null);
+        setVerified(null);
+        setUnsealState("locked");
+      } else {
+        setSealedRaw(null);
+        setSealedParams(null);
+        setCompleteData(payload);
+        setVerified(intact);
+        void sha256(payload).then((digest) => setReceivedDigest(fingerprint(digest)));
+      }
       stopCamera();
     }
   }, [acceptCalibration, resetReceiver, stopCamera]);
@@ -397,6 +462,24 @@ export default function Home() {
     if (model) void buildPayload(model.bytes, model.name, preset.blockSize);
   };
 
+  const attemptUnseal = useCallback(async () => {
+    if (!sealedRaw || !sealedParams || !receivePassphrase) return;
+    setUnsealState("working");
+    const opened = await unseal(sealedRaw, receivePassphrase, sealedParams);
+    if (!opened) {
+      // GCM cannot tell a wrong passphrase from an altered payload, so the UI
+      // does not claim to either.
+      setUnsealState("failed");
+      setVerified(false);
+      setCompleteData(null);
+      return;
+    }
+    setCompleteData(opened);
+    setVerified(true);
+    setUnsealState("open");
+    setReceivedDigest(fingerprint(await sha256(opened)));
+  }, [receivePassphrase, sealedParams, sealedRaw]);
+
   const startCalibration = () => {
     setSending(false);
     calibrationRun.current = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
@@ -443,6 +526,28 @@ export default function Home() {
             <button className="secondary" onClick={makeSynthetic}>Regenerate test data</button>
             <label className="file-picker">Choose a local file<input type="file" onChange={async (event) => { const file = event.target.files?.[0]; if (file) await buildPayload(new Uint8Array(await file.arrayBuffer()), file.name); }} /></label>
             <div className="divider" />
+            <div className={model?.seal ? "seal-callout armed" : "seal-callout"}>
+              <span className="field-label">Encryption</span>
+              <p>{model?.seal
+                ? "Payload is sealed with AES-256-GCM. Receivers need the passphrase."
+                : "Unencrypted. Anyone with a view of this screen can read the payload."}</p>
+              <input
+                type="password" placeholder="Shared passphrase" value={passphrase}
+                autoComplete="off" spellCheck={false}
+                onChange={(event) => setPassphrase(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") applyPassphrase(passphrase); }}
+              />
+              <div className="seal-actions">
+                <button className="calibration-button" disabled={sealing || !passphrase || !model} onClick={() => applyPassphrase(passphrase)}>
+                  {sealing ? "Deriving key…" : model?.seal ? "Re-seal payload" : "Encrypt payload"}
+                </button>
+                {model?.seal && <button className="text-button" disabled={sealing} onClick={() => { setPassphrase(""); applyPassphrase(""); }}>Remove</button>}
+              </div>
+              {model?.seal
+                ? <p className="hint">Key derived with PBKDF2-SHA256, {model.seal.iterations.toLocaleString()} iterations. Share the phrase out of band — spoken aloud, not over the same channel.</p>
+                : <p className="hint">A room of receivers can share one phrase. Everyone holding it can decrypt, now or from a recording.</p>}
+            </div>
+            <div className="divider" />
             <div className="calibration-callout">
               <span className="field-label">Device calibration</span>
               <p>Cycle through five profiles while the iPhone receiver scores each one.</p>
@@ -458,14 +563,15 @@ export default function Home() {
           </div>
 
           <div className="panel transmitter">
-            <div className="transmit-head"><div><span className="kicker">{calibrating ? "Calibration sweep" : "Transmitting"}</span><h2>{calibrating ? SWEEP_PROFILES[calibrationStatus.profile].name : model?.name ?? "Preparing data…"}</h2></div><span className={sending || calibrating ? "live active" : "live"}><i />{calibrating ? "TEST" : sending ? "LIVE" : "PAUSED"}</span></div>
+            <div className="transmit-head"><div><span className="kicker">{calibrating ? "Calibration sweep" : model?.seal ? "Transmitting · sealed" : "Transmitting"}</span><h2>{calibrating ? SWEEP_PROFILES[calibrationStatus.profile].name : model?.name ?? "Preparing data…"}</h2></div><span className={sending || calibrating ? "live active" : "live"}><i />{calibrating ? "TEST" : sending ? "LIVE" : "PAUSED"}</span></div>
+            {!calibrating && model && <p className="digest">SHA-256 {model.digest}{model.seal ? " · sealed" : " · cleartext"}</p>}
             <div className="qr-stage"><canvas ref={qrCanvas} /><div className="corner tl"/><div className="corner tr"/><div className="corner bl"/><div className="corner br"/></div>
-            <div className="progress-row"><span>{calibrating ? `Profile ${calibrationStatus.profile + 1} / ${SWEEP_PROFILES.length}` : `Frame ${sendIndex + 1} · ${model ? Math.ceil(model.bytes.length / model.blockLen) : 0} source blocks`}</span><span>{calibrating ? `${Math.round(calibrationStatus.progress * 100)}%` : model ? formatBytes(model.bytes.length) : "—"}</span></div>
+            <div className="progress-row"><span>{calibrating ? `Profile ${calibrationStatus.profile + 1} / ${SWEEP_PROFILES.length}` : `Frame ${sendIndex + 1} · ${model ? Math.ceil(model.transmit.length / model.blockLen) : 0} source blocks`}</span><span>{calibrating ? `${Math.round(calibrationStatus.progress * 100)}%` : model ? formatBytes(model.bytes.length) : "—"}</span></div>
             <button className="primary" disabled={calibrating} onClick={() => setSending((value) => !value)}>{calibrating ? "Testing receiver…" : sending ? "Pause transmission" : "Start transmission"}</button>
             <div className="metrics-grid">
               <Metric value={displayFps ? displayFps.toFixed(1) : "—"} label="actual display fps" />
               <Metric value={formatBytes(theoretical) + "/s"} label="payload ceiling" />
-              <Metric value={String(model ? Math.ceil(model.bytes.length / model.blockLen) : 0)} label="source blocks" />
+              <Metric value={String(model ? Math.ceil(model.transmit.length / model.blockLen) : 0)} label="source blocks" />
             </div>
           </div>
         </section>
@@ -519,10 +625,32 @@ export default function Home() {
                 <Metric value={receiveStats.elapsed ? receiveStats.elapsed.toFixed(1) + "s" : "—"} label="elapsed time" />
                 <Metric value={receiveStats.scans ? String(receiveStats.scans - receiveStats.unique) : "—"} label="duplicate reads" />
               </div>
+              {sealedRaw && unsealState !== "open" && <div className="unlock-panel">
+                <span className="field-label">Sealed transfer</span>
+                <p>{formatBytes(sealedRaw.length)} of ciphertext recovered. Enter the sender&apos;s passphrase to open it.</p>
+                <input
+                  type="password" placeholder="Shared passphrase" value={receivePassphrase}
+                  autoComplete="off" spellCheck={false}
+                  onChange={(event) => setReceivePassphrase(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === "Enter") void attemptUnseal(); }}
+                />
+                <button className="primary" disabled={unsealState === "working" || !receivePassphrase} onClick={() => void attemptUnseal()}>
+                  {unsealState === "working" ? "Deriving key…" : "Unlock payload"}
+                </button>
+                {unsealState === "failed" && <p className="error">Could not open. The passphrase is wrong, or the payload was altered in transit — these are indistinguishable.</p>}
+              </div>}
               <div className={`verification ${verified === true ? "good" : verified === false ? "bad" : ""}`}>
                 <span>{verified === true ? "✓" : verified === false ? "!" : "…"}</span>
-                <div><strong>{verified === true ? "Transfer verified" : verified === false ? "Checksum mismatch" : "Collecting fountain frames"}</strong><p>{verified === true ? "The reconstructed bytes match the sender." : "Any new fountain frame can advance recovery."}</p></div>
+                <div>
+                  <strong>{verified === true ? (unsealState === "open" ? "Decrypted and authenticated" : "Reassembled") : verified === false ? (unsealState === "failed" ? "Could not decrypt" : "Checksum mismatch") : sealedRaw ? "Sealed — passphrase required" : "Collecting fountain frames"}</strong>
+                  <p>{verified === true
+                    ? (unsealState === "open"
+                      ? "The GCM tag verified: these bytes are exactly what the sender sealed."
+                      : "Bytes reassembled intact. This transfer was unencrypted, so it is not authenticated — compare the digest out of band.")
+                    : "Any new fountain frame can advance recovery."}</p>
+                </div>
               </div>
+              {receivedDigest && <p className="digest">SHA-256 {receivedDigest}</p>}
               {completeData && <button className="secondary full" onClick={() => { const url = URL.createObjectURL(new Blob([new Uint8Array(completeData)])); const anchor = document.createElement("a"); anchor.href = url; anchor.download = "airgap-received.bin"; anchor.click(); URL.revokeObjectURL(url); }}>Download received file</button>}
               <button className="text-button" onClick={resetReceiver}>Reset receiver statistics</button>
             </>}

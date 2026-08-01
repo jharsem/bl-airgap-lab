@@ -54,8 +54,10 @@ The single HTML file can also be copied to any static HTTPS web server.
 npm test
 ```
 
-Tests verify the standalone artifact shape, protocol features, and recovery of
-a payload with simulated dropped and duplicate fountain frames.
+Tests verify the standalone artifact shape, protocol features, recovery of a
+payload with simulated dropped and duplicate fountain frames, and the sealed
+round trip — including that a wrong passphrase and a tampered payload both fail
+closed.
 
 ## Optical pipeline
 
@@ -65,11 +67,50 @@ a payload with simulated dropped and duplicate fountain frames.
 - Camera delivery driven by `requestVideoFrameCallback` when available
 - Fixed QR mask, integer scaling, and queued sender frames
 - Calibration sweep from conservative to maximum-density profiles
+- Optional AES-256-GCM sealing, applied before fountain coding
 - Reconstructed-byte verification before download
 
 AirGap Lab does not create a radio or network data channel between sender and
 receiver. A network connection may be used only to load the page; the selected
 payload itself travels through the screen and camera.
+
+## Encryption
+
+Enter a passphrase on the transmitter and press **Encrypt payload**. The
+receiver needs the same phrase to open the transfer.
+
+- **AES-256-GCM**, with the key derived by PBKDF2-SHA256 at 600,000 iterations.
+  The salt, nonce, and iteration count travel in every sealed frame, so a
+  receiver that joins the stream late can still open the payload.
+- **Encrypt-then-fountain.** The payload is sealed once and the fountain codes
+  the ciphertext, so frames stay interchangeable and the stream stays rateless.
+- Everything uses WebCrypto — no dependencies, and it works offline.
+
+Because the passphrase is a shared secret, one sender can broadcast to a room
+of receivers who all hold the same phrase. Share it out of band; speaking it
+aloud is fine, sending it over the channel you are trying to protect is not.
+
+### What this does and does not protect
+
+An **unencrypted** transfer is readable by anyone with a view of the screen,
+and it is *not authenticated*. The FNV-1a value in the frame header is a
+reassembly check, not a security property: it is keyless, so anyone able to put
+frames in front of the camera can substitute a payload and recompute it. The
+receiver labels these transfers as unauthenticated and shows a SHA-256 digest
+so you can compare it against one obtained out of band.
+
+An **encrypted** transfer is confidential and authenticated — the GCM tag means
+a payload that opens is exactly what the sender sealed. A failed open reports
+one outcome, not two: GCM cannot distinguish a wrong passphrase from an altered
+payload, so neither does the UI.
+
+Neither mode protects against a compromised sender or receiver, and neither
+hides metadata. Payload size, transfer duration, and the fact that a transfer
+is happening at all remain visible to anyone watching the screen.
+
+Passphrases inherit every shared-secret weakness: no per-recipient revocation,
+no sender authentication, and a recording of the screen stays decryptable by
+anyone who ever learned the phrase.
 
 ## Acknowledgements
 
