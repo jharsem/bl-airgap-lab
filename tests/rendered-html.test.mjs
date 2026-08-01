@@ -16,6 +16,30 @@ test("builds AirGap as one self-contained HTML file", async () => {
   assert.doesNotMatch(html, /react-loading-skeleton/i);
 });
 
+// The whole point of the artifact is that opening it starts no network
+// traffic, so no URL in it should be dereferenceable. Two families survive on
+// purpose and are allowed by host:
+//
+//   www.w3.org  namespace URIs in SVG and MathML markup — identifiers that
+//               parsers compare as strings and never fetch.
+//   react.dev   interpolated into React's minified error messages as a
+//               documentation pointer; it is text in an Error, not a request.
+//
+// Anything else is a finding. The likely source is a dependency's CDN fallback
+// for its own assets — the shape zxing-wasm's `locateFile` default had before
+// vite.config.ts started stripping it.
+const ALLOWED_URL_HOSTS = ["www.w3.org", "react.dev"];
+
+test("ships no network path in the built artifact", async () => {
+  const html = await readFile(new URL("../dist/index.html", import.meta.url), "utf8");
+  const urls = html.match(/https?:\/\/[^\s"'`)\\,;<>]+/g) ?? [];
+  const external = [...new Set(urls)].filter((url) => {
+    const host = URL.parse(url)?.host;
+    return host === undefined || !ALLOWED_URL_HOSTS.includes(host);
+  });
+  assert.deepEqual(external, [], `built file reaches the network: ${external.join(", ")}`);
+});
+
 test("ships the optical protocol and receiver integrity checks", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const protocol = await readFile(new URL("../app/optical/protocol.ts", import.meta.url), "utf8");

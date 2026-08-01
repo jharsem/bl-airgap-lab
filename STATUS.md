@@ -19,23 +19,23 @@ eye, and don't widen it without comparing against upstream first.
 
 ## Open items
 
-**1. ~~Manual browser check of the encryption flow.~~ Done — app tested by hand
-and working.** One caveat worth recording: it is not confirmed that the
-late-joining receiver case was exercised specifically — starting a scan
-mid-stream and still opening the payload. That is the property the per-frame
-crypto header exists to protect, so if it has not been driven end to end, it is
-still the check most worth doing.
+**1. ~~Manual browser check of the encryption flow.~~ Done — driven by hand in
+a real browser on 2026-08-02, including the late-joining receiver.** Starting a
+scan mid-stream and still opening the payload works, which is the property the
+per-frame crypto header exists to protect and the one the design most depended
+on. Encrypt → transmit → scan → unlock is confirmed end to end.
 
 **2. ~~Cut the first release.~~ Done — `v1.0.0` tagged and published
-2026-08-02.** Release workflow succeeded; `airgap-lab-v1.0.0.html` (1,712,626
-bytes) and `SHA256SUMS` are attached at
-<https://github.com/jharsem/bl-airgap-lab/releases/tag/v1.0.0>. The published
-digest `47dc822e15e7ab86eaca226878dfbb6ed60dc47afc52ed7a82edfb7dd380fe90`
-matches a local `npm run build` byte for byte, so the build is reproducible
-across machines. Next release is the same one-liner:
+2026-08-02**, `v1.0.1` the same day once the CDN fallback was stripped. Assets
+are the single HTML file plus `SHA256SUMS` at
+<https://github.com/jharsem/bl-airgap-lab/releases>. The v1.0.0 digest
+`47dc822e15e7ab86eaca226878dfbb6ed60dc47afc52ed7a82edfb7dd380fe90` matched a
+local `npm run build` byte for byte, so the build reproduces across machines —
+worth re-checking on future releases, since it is the property that lets anyone
+verify the download independently. Releasing is one line:
 
 ```bash
-git tag v1.0.1 && git push origin v1.0.1
+git tag v1.0.2 && git push origin v1.0.2
 ```
 
 **3. Repo history was squashed to a single root commit on 2026-08-01.** GitHub
@@ -90,15 +90,28 @@ Recorded so they don't get re-litigated:
   the app over the network on every use defeats the point.
 - **`gh release create` rather than a marketplace action**, to keep an unpinned
   third-party action out of the publishing path.
-- **The bundle contains a jsdelivr URL string; it is dead code.** Grepping the
-  artifact turns up
-  `https://fastly.jsdelivr.net/npm/zxing-wasm@3.1.2/...` — zxing-wasm's default
-  CDN fallback for locating its `.wasm`. It is never reached:
-  `decoder.worker.ts` overrides `locateFile` to return the bundled asset, and
-  `assetsInlineLimit: () => true` inlines that as a `data:application/wasm`
-  URI. Verified present in the built file. Expect this to be re-flagged by
-  anyone auditing the artifact for network paths — the answer is the override,
-  not a rebuild.
+- **The artifact carries no external URL, and a test enforces it.**
+  zxing-wasm's default `locateFile` resolved its `.wasm` against a jsDelivr
+  CDN. That branch was already unreachable — `decoder.worker.ts` overrides
+  `locateFile`, and the override replaces the default rather than merging with
+  it — but an unreachable CDN URL still fails *open* if a later change drops
+  the override. The `strip-zxing-cdn-fallback` plugin in `vite.config.ts`
+  rewrites it to a relative path that cannot resolve, so that mistake fails
+  closed instead. Note it is registered twice, under `plugins` and
+  `worker.plugins`: Vite bundles workers in a separate Rollup pass that does
+  not inherit `plugins`, and zxing-wasm is reached only from the worker, so the
+  `plugins` entry alone silently did nothing.
+
+  The plugin is the fix; the `ships no network path` test is the guarantee. It
+  fails on any URL in the built file outside an allowlist of `www.w3.org`
+  (namespace identifiers in SVG/MathML, never fetched) and `react.dev` (a
+  documentation pointer in React's minified error messages). A zxing-wasm
+  upgrade that moves the URL out of the plugin's reach breaks that test rather
+  than quietly restoring a CDN reference.
+
+  **The published v1.0.0 asset predates this** and still contains the jsdelivr
+  string. Harmless for the reason above, but anyone auditing that specific
+  download will find it.
 
 ## Environment notes
 
