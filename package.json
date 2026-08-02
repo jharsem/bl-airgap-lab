@@ -10,7 +10,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/fountain.test.mjs tests/crypto.test.mjs"
+    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/protocol.test.mjs tests/fountain.test.mjs tests/crypto.test.mjs"
   },
   "dependencies": {
     "qrcode": "^1.5.4",

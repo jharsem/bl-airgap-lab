@@ -71,7 +71,8 @@ npm test
 Tests verify the standalone artifact shape, protocol features, recovery of a
 payload with simulated dropped and duplicate fountain frames, and the sealed
 round trip — including that a wrong passphrase and a tampered payload both fail
-closed.
+closed. Malformed frame dimensions and unsafe KDF costs are rejected before
+they can consume receiver resources.
 
 ## Optical pipeline
 
@@ -83,6 +84,8 @@ closed.
 - Calibration sweep from conservative to maximum-density profiles
 - Optional AES-256-GCM sealing, applied before fountain coding
 - Reconstructed-byte verification before download
+- Production Content Security Policy permits only inline data/blob resources
+  and blocks network connections
 
 AirGap Lab does not create a radio or network data channel between sender and
 receiver. A network connection may be used only to load the page; the selected

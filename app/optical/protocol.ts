@@ -19,6 +19,10 @@
 
 export const HEADER_LEN = 20;
 export const SEALED_HEADER_LEN = 52;
+export const MAX_BLOCK_LEN = 2900;
+export const MAX_PAYLOAD_LEN = 128 * 1024 * 1024;
+export const MIN_PBKDF2_ITERATIONS = 100_000;
+export const MAX_PBKDF2_ITERATIONS = 2_000_000;
 const DATA_MAGIC0 = 0xd1;
 const DATA_MAGIC1 = 0x0c;
 const SEALED_MAGIC1 = 0x0e;
@@ -62,8 +66,42 @@ export function frameHeaderLen(sealed: boolean) {
   return sealed ? SEALED_HEADER_LEN : HEADER_LEN;
 }
 
+export function maxPayloadForBlock(blockLen: number): number {
+  if (!Number.isInteger(blockLen) || blockLen < 1 || blockLen > MAX_BLOCK_LEN) return 0;
+  return Math.min(MAX_PAYLOAD_LEN, blockLen * 0xffff);
+}
+
+function validFrameShape(header: FrameHeader, blockLength: number): boolean {
+  return Number.isInteger(header.sessionId) && header.sessionId > 0 && header.sessionId <= 0xffff
+    && Number.isInteger(header.seq) && header.seq >= 0 && header.seq <= 0xffff_ffff
+    && Number.isInteger(header.k) && header.k > 0 && header.k <= 0xffff
+    && Number.isInteger(header.blockLen) && header.blockLen > 0 && header.blockLen <= MAX_BLOCK_LEN
+    && blockLength === header.blockLen
+    && Number.isInteger(header.totalLen) && header.totalLen > 0 && header.totalLen <= maxPayloadForBlock(header.blockLen)
+    && Math.ceil(header.totalLen / header.blockLen) === header.k
+    && Number.isInteger(header.payloadFnv) && header.payloadFnv >= 0 && header.payloadFnv <= 0xffff_ffff;
+}
+
+function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+/** All fields that identify and describe a stream must remain fixed across its frames. */
+export function sameFrameStream(left: FrameHeader, right: FrameHeader): boolean {
+  if (left.sessionId !== right.sessionId || left.k !== right.k || left.blockLen !== right.blockLen
+    || left.totalLen !== right.totalLen || left.payloadFnv !== right.payloadFnv
+    || Boolean(left.seal) !== Boolean(right.seal)) return false;
+  if (!left.seal || !right.seal) return true;
+  return left.seal.kdf === right.seal.kdf && left.seal.iterations === right.seal.iterations
+    && equalBytes(left.seal.salt, right.seal.salt) && equalBytes(left.seal.nonce, right.seal.nonce);
+}
+
 export function packFrame(header: FrameHeader, block: Uint8Array): Uint8Array {
   const seal = header.seal;
+  if (!validFrameShape(header, block.length)) throw new RangeError("Invalid frame dimensions");
+  if (seal && (seal.kdf !== 1 || seal.salt.length !== 16 || seal.nonce.length !== 12
+    || seal.iterations < MIN_PBKDF2_ITERATIONS || seal.iterations > MAX_PBKDF2_ITERATIONS
+    || seal.iterations % 1000 !== 0)) throw new RangeError("Invalid frame seal parameters");
   const headerLen = frameHeaderLen(Boolean(seal));
   const out = new Uint8Array(headerLen + block.length);
   const view = new DataView(out.buffer);
@@ -100,10 +138,11 @@ export function parseFrame(bytes: Uint8Array): { header: FrameHeader; block: Uin
     k: view.getUint16(8, true), blockLen: view.getUint16(10, true),
     totalLen: view.getUint32(12, true), payloadFnv: view.getUint32(16, true),
   };
-  if (!header.k || !header.blockLen || !header.totalLen || bytes.length !== headerLen + header.blockLen) return null;
+  if (!validFrameShape(header, bytes.length - headerLen)) return null;
   if (sealed) {
     const iterations = view.getUint16(22, true) * 1000;
-    if (!iterations) return null;
+    if (view.getUint8(20) !== 1 || view.getUint8(21) !== 0
+      || iterations < MIN_PBKDF2_ITERATIONS || iterations > MAX_PBKDF2_ITERATIONS) return null;
     header.seal = {
       kdf: view.getUint8(20),
       iterations,

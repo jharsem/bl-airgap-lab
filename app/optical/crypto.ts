@@ -53,9 +53,9 @@ export function toHex(bytes: Uint8Array): string {
   return out;
 }
 
-/** Short fingerprint for out-of-band comparison — display only, never a check. */
+/** Full digest for out-of-band comparison — display only, never a check. */
 export function fingerprint(digest: Uint8Array): string {
-  return toHex(digest.subarray(0, 8)).replace(/(.{4})/g, "$1 ").trim();
+  return toHex(digest);
 }
 
 async function deriveKey(passphrase: string, salt: Uint8Array, iterations: number): Promise<CryptoKey> {

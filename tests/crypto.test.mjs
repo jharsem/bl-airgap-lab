@@ -12,8 +12,8 @@ async function load() {
   return { ...modules, close: () => vite.close() };
 }
 
-// A low iteration count keeps the suite fast. Production uses DEFAULT_ITERATIONS.
-const TEST_ITERATIONS = 1000;
+// Keep tests at the protocol's accepted floor while production uses 600,000.
+const TEST_ITERATIONS = 100_000;
 
 test("a sealed payload survives the full optical round trip", async () => {
   const { crypto: cryptoMod, protocol, fountain, close } = await load();
@@ -86,6 +86,18 @@ test("a wrong passphrase and a tampered payload both fail closed", async () => {
     assert.equal(await unseal(sealed.ciphertext, "right", { ...params, kdf: 99 }), null);
 
     assert.deepEqual(await unseal(sealed.ciphertext, "right", params), payload);
+  } finally {
+    await close();
+  }
+});
+
+test("displays the full SHA-256 digest for out-of-band comparison", async () => {
+  const { crypto: cryptoMod, close } = await load();
+  try {
+    const digest = await cryptoMod.sha256(new Uint8Array([1, 2, 3]));
+    const displayed = cryptoMod.fingerprint(digest);
+    assert.equal(displayed.length, 64);
+    assert.equal(displayed, cryptoMod.toHex(digest));
   } finally {
     await close();
   }

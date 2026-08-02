@@ -4,7 +4,8 @@ import DecoderWorker from "./optical/decoder.worker?worker&inline";
 import { LTDecoder, LTEncoder } from "./optical/fountain";
 import {
   fnv1a, packCalibrationControl, packCalibrationData, packFrame,
-  parseCalibrationPacket, parseFrame, type CalibrationEvent, type CalibrationPacket, type FrameSeal,
+  maxPayloadForBlock, parseCalibrationPacket, parseFrame, sameFrameStream,
+  type CalibrationEvent, type CalibrationPacket, type FrameHeader, type FrameSeal,
 } from "./optical/protocol";
 import { fingerprint, seal as sealPayload, sha256, unseal } from "./optical/crypto";
 
@@ -41,6 +42,16 @@ const SWEEP_PROFILES = [
 ];
 
 const QR_MARGIN = 4;
+const GCM_TAG_LEN = 16;
+
+function payloadIssue(bytes: Uint8Array, blockLen: number, sealed: boolean): string | null {
+  if (bytes.length === 0) return "Empty files are not supported.";
+  const maximum = maxPayloadForBlock(blockLen) - (sealed ? GCM_TAG_LEN : 0);
+  if (bytes.length > maximum) {
+    return `This configuration supports files up to ${formatBytes(maximum)}. Choose a larger frame size or a smaller file.`;
+  }
+  return null;
+}
 
 function createQrImage(bytes: Uint8Array, errorLevel: ErrorLevel, sequence: number, version?: number): QrImage {
   const qr = QRCode.create([{ data: bytes, mode: "byte" } as unknown as QRCode.QRCodeSegment], {
@@ -89,6 +100,7 @@ export default function Home() {
   const [targetFps, setTargetFps] = useState(24);
   const [errorLevel, setErrorLevel] = useState<ErrorLevel>("L");
   const [payloadSize, setPayloadSize] = useState(64);
+  const [payloadError, setPayloadError] = useState("");
   const [model, setModel] = useState<SourceModel | null>(null);
   const [sending, setSending] = useState(false);
   const [calibrating, setCalibrating] = useState(false);
@@ -120,6 +132,7 @@ export default function Home() {
   const captureGeneration = useRef(0);
   const frameCounter = useRef(0);
   const decoder = useRef<LTDecoder | null>(null);
+  const decoderHeader = useRef<FrameHeader | null>(null);
   const decoderSession = useRef(0);
   const transferDone = useRef(false);
   const equationCounter = useRef(0);
@@ -135,8 +148,16 @@ export default function Home() {
     bytes: Uint8Array, name: string, nextBlockSize = chunkSize, phrase = sealPassphrase,
   ) => {
     equationCounter.current = 0;
-    const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
     setSending(false);
+    const issue = payloadIssue(bytes, nextBlockSize, Boolean(phrase));
+    if (issue) {
+      setPayloadError(`${issue} The previous payload is unchanged.`);
+      return false;
+    }
+    const sessionBytes = new Uint16Array(1);
+    do crypto.getRandomValues(sessionBytes); while (sessionBytes[0] === 0);
+    const sessionId = sessionBytes[0];
+    setPayloadError("");
     setSealing(Boolean(phrase));
     try {
       // Fingerprint the plaintext, so the value shown here is comparable with
@@ -155,6 +176,10 @@ export default function Home() {
       });
       setSendIndex(0);
       setDisplayFps(0);
+      return true;
+    } catch (error) {
+      setPayloadError(error instanceof Error ? `Could not prepare payload: ${error.message}` : "Could not prepare payload.");
+      return false;
     } finally {
       setSealing(false);
     }
@@ -276,18 +301,31 @@ export default function Home() {
     return () => { cancelled = true; window.clearTimeout(timer); cancelAnimationFrame(animation); };
   }, [model, sending, targetFps, errorLevel, calibrating]);
 
-  const stopCamera = useCallback(() => {
+  const releaseCamera = useCallback(() => {
     captureGeneration.current += 1;
     stream.current?.getTracks().forEach((track) => track.stop());
     stream.current = null;
     decoderWorkers.current.forEach((worker) => worker.terminate());
     decoderWorkers.current = [];
     workerBusy.current = [];
-    setCameraState("idle");
+    if (video.current) video.current.srcObject = null;
   }, []);
+
+  const stopCamera = useCallback(() => {
+    releaseCamera();
+    setCameraState("idle");
+  }, [releaseCamera]);
+
+  const failCamera = useCallback((error: unknown) => {
+    releaseCamera();
+    setCameraState("error");
+    setCameraInfo("");
+    setCameraError(error instanceof Error ? error.message : "Camera access failed");
+  }, [releaseCamera]);
 
   const resetReceiver = useCallback(() => {
     decoder.current = null;
+    decoderHeader.current = null;
     decoderSession.current = 0;
     transferDone.current = false;
     calibrationSeen.current.clear();
@@ -355,12 +393,14 @@ export default function Home() {
     const parsed = parseFrame(bytes);
     if (!parsed) return;
     const { header, block } = parsed;
-    if (!decoder.current || decoderSession.current !== header.sessionId) {
-      resetReceiver();
+    if (!decoder.current) {
       decoder.current = new LTDecoder(header.k, header.blockLen, header.sessionId, header.totalLen);
+      decoderHeader.current = header;
       decoderSession.current = header.sessionId;
       receiveStarted.current = performance.now();
     }
+    if (decoderSession.current !== header.sessionId || !decoderHeader.current
+      || !sameFrameStream(decoderHeader.current, header)) return;
     const active = decoder.current;
     active.addFrame(header.seq, block);
     const elapsed = Math.max(0.001, (performance.now() - receiveStarted.current) / 1000);
@@ -387,13 +427,13 @@ export default function Home() {
       } else {
         setSealedRaw(null);
         setSealedParams(null);
-        setCompleteData(payload);
+        setCompleteData(intact ? payload : null);
         setVerified(intact);
         void sha256(payload).then((digest) => setReceivedDigest(fingerprint(digest)));
       }
       stopCamera();
     }
-  }, [acceptCalibration, resetReceiver, stopCamera]);
+  }, [acceptCalibration, stopCamera]);
 
   const startCamera = useCallback(async () => {
     resetReceiver();
@@ -406,7 +446,7 @@ export default function Home() {
       try { media = await navigator.mediaDevices.getUserMedia({ video: { ...base, frameRate: { exact: 60 } }, audio: false }); }
       catch { media = await navigator.mediaDevices.getUserMedia({ video: { ...base, frameRate: { ideal: 60 } }, audio: false }); }
       stream.current = media;
-      if (!video.current) return;
+      if (!video.current) throw new Error("Camera preview is unavailable");
       video.current.srcObject = media;
       await video.current.play();
       setCameraState("running");
@@ -419,6 +459,7 @@ export default function Home() {
           workerBusy.current[slot] = false;
           if (event.data.bytes) acceptDecoded(new Uint8Array(event.data.bytes));
         };
+        worker.onerror = () => failCamera(new Error("QR decoder worker failed"));
         return worker;
       });
       workerBusy.current = [false, false];
@@ -433,12 +474,18 @@ export default function Home() {
           if (generation !== captureGeneration.current || player.readyState < 2) return schedule();
           const slot = workerBusy.current.indexOf(false);
           if (slot >= 0 && player.videoWidth && player.videoHeight) {
-            canvas.width = player.videoWidth; canvas.height = player.videoHeight;
-            const context = canvas.getContext("2d", { willReadFrequently: true })!;
-            context.drawImage(player, 0, 0);
-            const image = context.getImageData(0, 0, canvas.width, canvas.height);
-            workerBusy.current[slot] = true;
-            decoderWorkers.current[slot]?.postMessage({ id: frameCounter.current++, buffer: image.data.buffer, width: canvas.width, height: canvas.height }, [image.data.buffer]);
+            try {
+              canvas.width = player.videoWidth; canvas.height = player.videoHeight;
+              const context = canvas.getContext("2d", { willReadFrequently: true });
+              if (!context) throw new Error("Camera capture canvas is unavailable");
+              context.drawImage(player, 0, 0);
+              const image = context.getImageData(0, 0, canvas.width, canvas.height);
+              workerBusy.current[slot] = true;
+              decoderWorkers.current[slot]?.postMessage({ id: frameCounter.current++, buffer: image.data.buffer, width: canvas.width, height: canvas.height }, [image.data.buffer]);
+            } catch (error) {
+              failCamera(error);
+              return;
+            }
           }
           schedule();
         };
@@ -448,14 +495,17 @@ export default function Home() {
       };
       schedule();
     } catch (error) {
-      setCameraState("error");
-      setCameraError(error instanceof Error ? error.message : "Camera access failed");
+      failCamera(error);
     }
-  }, [acceptDecoded, resetReceiver]);
+  }, [acceptDecoded, failCamera, resetReceiver]);
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
   const applyPreset = (preset: (typeof PRESETS)[number]) => {
+    if (model) {
+      const issue = payloadIssue(model.bytes, preset.blockSize, Boolean(sealPassphrase));
+      if (issue) { setPayloadError(`Preset not applied. ${issue}`); return; }
+    }
     setChunkSize(preset.blockSize);
     setTargetFps(preset.fps);
     setErrorLevel(preset.level);
@@ -524,7 +574,13 @@ export default function Home() {
             <div className="panel-heading"><span>01</span><div><h2>Configure payload</h2><p>Use generated data or choose a local file.</p></div></div>
             <label className="field"><span>Synthetic payload <b>{payloadSize} kB</b></span><input type="range" min="4" max="512" step="4" value={payloadSize} onChange={(event) => setPayloadSize(Number(event.target.value))} /></label>
             <button className="secondary" onClick={makeSynthetic}>Regenerate test data</button>
-            <label className="file-picker">Choose a local file<input type="file" onChange={async (event) => { const file = event.target.files?.[0]; if (file) await buildPayload(new Uint8Array(await file.arrayBuffer()), file.name); }} /></label>
+            <label className="file-picker">Choose a local file<input type="file" onChange={async (event) => {
+              const file = event.target.files?.[0];
+              if (!file) return;
+              try { await buildPayload(new Uint8Array(await file.arrayBuffer()), file.name); }
+              catch (error) { setPayloadError(error instanceof Error ? `Could not read file: ${error.message}` : "Could not read file."); }
+            }} /></label>
+            {payloadError && <p className="error" role="alert">{payloadError}</p>}
             <div className="divider" />
             <div className={model?.seal ? "seal-callout armed" : "seal-callout"}>
               <span className="field-label">Encryption</span>
@@ -557,7 +613,15 @@ export default function Home() {
             <div className="divider" />
             <span className="field-label">Performance preset</span>
             <div className="preset-grid">{PRESETS.map((preset) => <button key={preset.name} className={chunkSize === preset.blockSize && targetFps === preset.fps ? "selected" : ""} onClick={() => applyPreset(preset)}><strong>{preset.name}</strong><span>{preset.blockSize} B · {preset.fps} fps</span></button>)}</div>
-            <label className="field"><span>Data per frame <b>{chunkSize} bytes</b></span><input type="range" min="400" max="2800" step="20" value={chunkSize} onChange={(event) => { const next = Number(event.target.value); setChunkSize(next); if (model) buildPayload(model.bytes, model.name, next); }} /></label>
+            <label className="field"><span>Data per frame <b>{chunkSize} bytes</b></span><input type="range" min="400" max="2800" step="20" value={chunkSize} onChange={(event) => {
+              const next = Number(event.target.value);
+              if (model) {
+                const issue = payloadIssue(model.bytes, next, Boolean(sealPassphrase));
+                if (issue) { setPayloadError(`Frame size not changed. ${issue}`); return; }
+              }
+              setChunkSize(next);
+              if (model) void buildPayload(model.bytes, model.name, next);
+            }} /></label>
             <label className="field"><span>Target rate <b>{targetFps} fps</b></span><input type="range" min="4" max="60" value={targetFps} onChange={(event) => setTargetFps(Number(event.target.value))} /></label>
             <p className="hint">Balanced is the best starting point. Try Aggressive after a clean verified transfer.</p>
           </div>

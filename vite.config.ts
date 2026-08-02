@@ -33,9 +33,39 @@ const stripZXingCdnFallback = (): Plugin => ({
   },
 });
 
+// The release artifact is intentionally incapable of contacting a network.
+// Inject this only into production builds so Vite's development websocket can
+// still operate. `data:` is required for the inlined WASM binary and `blob:`
+// for the inlined decoder workers; neither names a network origin.
+const enforceOfflineCsp = (): Plugin => ({
+  name: "enforce-offline-csp",
+  apply: "build",
+  transformIndexHtml: {
+    order: "post",
+    handler(html) {
+      const policy = [
+        "default-src 'none'",
+        "script-src 'unsafe-inline' 'wasm-unsafe-eval' blob:",
+        "style-src 'unsafe-inline'",
+        "img-src data: blob:",
+        "media-src blob:",
+        "worker-src blob:",
+        "child-src blob:",
+        "connect-src data:",
+        "font-src 'none'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-src 'none'",
+      ].join("; ");
+      return html.replace("<head>", `<head><meta http-equiv="Content-Security-Policy" content="${policy}">`);
+    },
+  },
+});
+
 export default defineConfig({
   base: "./",
-  plugins: [react(), basicSsl(), viteSingleFile(), stripZXingCdnFallback()],
+  plugins: [react(), basicSsl(), viteSingleFile(), stripZXingCdnFallback(), enforceOfflineCsp()],
   worker: { plugins: () => [stripZXingCdnFallback()] },
   build: {
     assetsInlineLimit: () => true,

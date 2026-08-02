@@ -14,6 +14,10 @@ test("builds AirGap as one self-contained HTML file", async () => {
   assert.doesNotMatch(html, /<script[^>]+src=/i);
   assert.doesNotMatch(html, /<link[^>]+rel=["']stylesheet["']/i);
   assert.doesNotMatch(html, /react-loading-skeleton/i);
+  assert.match(html, /http-equiv="Content-Security-Policy"/i);
+  assert.match(html, /default-src 'none'/);
+  assert.match(html, /connect-src data:/);
+  assert.doesNotMatch(html, /connect-src[^;]*(?:https?:|wss?:|'self')/i);
 });
 
 // The whole point of the artifact is that opening it starts no network
@@ -68,5 +72,8 @@ test("ships the optical protocol and receiver integrity checks", async () => {
   assert.match(worker, /formats: \["QRCode"\]/);
   assert.match(page, /maskPattern: 4/);
   assert.match(page, /requestAnimationFrame/);
+  assert.match(page, /worker\.onerror/);
+  assert.match(page, /releaseCamera/);
+  assert.match(page, /payloadIssue/);
   assert.match(page, /Download received file/);
 });
